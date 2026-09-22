@@ -10,15 +10,7 @@ not an executable Spring Boot application. Request DTOs are immutable Java recor
 
 ## Installation
 
-This version is a local development snapshot, **not published to Maven Central**.
-Install it into your local Maven repository first:
-
-```bash
-./mvnw clean install
-# Or use an installed Maven: mvn clean install
-```
-
-Then add:
+Add the published `1.0.0` release from Maven Central to your project's `pom.xml`:
 
 ```xml
 
@@ -30,6 +22,9 @@ Then add:
 ```
 
 Java 17+ is required. The optional Spring integration targets Spring Boot 3.x, matching eTIMS SDK.
+
+To build and install a local checkout for development, run `./mvnw clean install` (or `mvn clean install`).
+Installing locally is not required to consume the published release.
 
 ## Quick start: plain Java
 
@@ -487,7 +482,7 @@ Before running a release:
 
 1. Set a non-SNAPSHOT version in `pom.xml`, for example `1.0.0`, and commit it. When releasing
    from a tag, its name must match that version exactly, for example `v1.0.0`. The workflow rejects
-   snapshot versions and mismatched tags before accessing the signing key.
+   snapshot versions and mismatched tags when the `Validate release version` step is enabled.
 2. Add the following repository secrets under **Settings → Secrets and variables → Actions**:
 
    | Secret | Value |
@@ -525,6 +520,24 @@ and Maven reads `MAVEN_GPG_PASSPHRASE` without relying on an interactive agent. 
 Actions secret contains the passphrase for the imported signing key (not your Central token)
 and is accessible to the workflow. A missing or incorrect passphrase for a protected key will fail
 the signing check. No interactive pinentry program should be needed.
+
+### Published artifact but CI reports a status-parsing failure
+
+With `central-publishing-maven-plugin:0.5.0`, deployment can finish on Sonatype's servers while the
+plugin fails polling its status with `Unrecognized field "warnings"` on `DeploymentApiResponse`.
+That exception concerns the publishing client's response parsing, not the SDK's payment JSON models.
+The release profile now uses `0.11.0`, whose [release notes](https://central.sonatype.org/publish/publish-portal-maven/#0110)
+include support for publishing usage warnings.
+
+If this happens after upload, check the existing deployment ID in the
+[Central Portal](https://central.sonatype.com/publishing/deployments) before taking further action.
+If it is `PUBLISHED`, the release is complete even though the CI run failed. Do not rerun deployment
+for the same published version; published releases cannot be overwritten. Apply the plugin upgrade
+for future releases and use a new version for subsequent SDK changes. If the deployment is still
+processing or failed validation, inspect that deployment's status and messages first.
+
+The workflow continues to wait for `published`; it does not suppress errors or skip validation to
+make a release job appear successful. Updating the workflow does not change the result of an old CI run.
 
 ## Contributing
 
