@@ -70,6 +70,23 @@ jobs:
           gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
+      - name: Verify non-interactive signing
+        shell: bash
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          signing_check_dir=$(mktemp -d)
+          trap 'rm -rf "$signing_check_dir"' EXIT
+          printf '%s\n' 'Maven signing check' > "$signing_check_dir/check.txt"
+          if ! printf '%s\n' "$MAVEN_GPG_PASSPHRASE" | gpg \
+              --batch --yes --no-tty --pinentry-mode loopback --passphrase-fd 0 \
+              --detach-sign --output "$signing_check_dir/check.sig" "$signing_check_dir/check.txt"; then
+            echo '::error::Non-interactive signing failed. Set MAVEN_GPG_PASSPHRASE to the passphrase for the imported private signing key, and ensure the export contains usable private signing material.'
+            exit 1
+          fi
+          gpg --batch --verify "$signing_check_dir/check.sig" "$signing_check_dir/check.txt"
+
       - name: Deploy to Maven Central
         run: mvn --batch-mode --no-transfer-progress clean deploy -Prelease
         env:
