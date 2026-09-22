@@ -1,0 +1,78 @@
+name: Release to Maven Central
+
+# Release runs on pushes to live, version tags, or manual dispatch.
+# pom.xml must contain a non-SNAPSHOT version; version tags must match it.
+on:
+  push:
+    branches:
+      - live
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Sign & Publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          version = ET.parse('pom.xml').getroot().findtext('{http://maven.apache.org/POM/4.0.0}version', '').strip()
+          if not version or 'SNAPSHOT' in version.upper() or '${' in version:
+              raise SystemExit('::error::Set a non-SNAPSHOT release version in pom.xml before publishing. Use mvn clean verify for CI-only builds.')
+          if os.environ.get('GITHUB_REF_TYPE') == 'tag' and os.environ.get('GITHUB_REF_NAME') != 'v' + version:
+              raise SystemExit('::error::The release tag must be v followed by the exact pom.xml version.')
+          PY
+
+      - name: Validate publishing secrets
+        shell: bash
+        env:
+          MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          SONATYPE_USERNAME: ${{ secrets.SONATYPE_TOKEN_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_TOKEN_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import os
+
+          required = ('MAVEN_GPG_PRIVATE_KEY', 'SONATYPE_USERNAME', 'SONATYPE_PASSWORD')
+          missing = [name for name in required if not os.environ.get(name, '').strip()]
+          if missing:
+              raise SystemExit('::error::Missing publishing secrets for: ' + ', '.join(missing))
+          key = os.environ['MAVEN_GPG_PRIVATE_KEY'].strip()
+          if not (key.startswith('-----BEGIN PGP PRIVATE KEY BLOCK-----')
+                  and key.endswith('-----END PGP PRIVATE KEY BLOCK-----')
+                  and '\n' in key and '\\n' not in key):
+              raise SystemExit('::error::MAVEN_GPG_PRIVATE_KEY must contain the complete ASCII-armored private key with real line breaks, not a public key, fingerprint, or Base64-wrapped file. See README release setup.')
+          PY
+
+      # setup-java imports the key without interpolating it into shell source.
+      - name: Set up Java 17 and import signing key
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+          server-id: central
+          server-username: SONATYPE_USERNAME
+          server-password: SONATYPE_PASSWORD
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Deploy to Maven Central
+        run: mvn --batch-mode --no-transfer-progress clean deploy -Prelease
+        env:
+          SONATYPE_USERNAME: ${{ secrets.SONATYPE_TOKEN_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_TOKEN_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}

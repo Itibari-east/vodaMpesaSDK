@@ -204,7 +204,8 @@
                                     <goal>sign</goal>
                                 </goals>
                                 <configuration>
-                                    <!-- passphrase injected via -Dgpg.passphrase in CI -->
+                                    <!-- Read the passphrase from the CI environment, not command-line arguments. -->
+                                    <passphraseEnvName>MAVEN_GPG_PASSPHRASE</passphraseEnvName>
                                     <gpgArguments>
                                         <arg>--pinentry-mode</arg>
                                         <arg>loopback</arg>
@@ -223,9 +224,9 @@
                         <configuration>
                             <!-- Matches <server id="central"> in settings.xml / CI env -->
                             <publishingServerId>central</publishingServerId>
-                            <!-- Upload for review; publication is a separate release step. -->
-                            <autoPublish>false</autoPublish>
-                            <waitUntil>validated</waitUntil>
+                            <!-- CI publishes automatically; flip to false for manual review -->
+                            <autoPublish>true</autoPublish>
+                            <waitUntil>published</waitUntil>
                         </configuration>
                     </plugin>
 
