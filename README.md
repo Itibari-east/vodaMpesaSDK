@@ -25,7 +25,7 @@ Then add:
 <dependency>
     <groupId>io.github.montella-03</groupId>
     <artifactId>vodampesa-sdk</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
 </dependency>
 ```
 
