@@ -519,6 +519,13 @@ If key import still fails, inspect the final GPG error lines in the setup step; 
 private key or passphrase into an issue. If signing fails after import, check the passphrase and
 whether the exported key includes usable private signing material.
 
+If GPG reports `signing failed: No pinentry`, it attempted an interactive passphrase prompt that
+is unavailable in CI. The workflow now tests signing in batch/loopback mode before deploying,
+and Maven reads `MAVEN_GPG_PASSPHRASE` without relying on an interactive agent. Ensure that this
+Actions secret contains the passphrase for the imported signing key (not your Central token)
+and is accessible to the workflow. A missing or incorrect passphrase for a protected key will fail
+the signing check. No interactive pinentry program should be needed.
+
 ## Contributing
 
 Please raise an issue and agree on the scope with a maintainer before starting a contribution.

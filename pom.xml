@@ -206,7 +206,10 @@
                                 <configuration>
                                     <!-- Read the passphrase from the CI environment, not command-line arguments. -->
                                     <passphraseEnvName>MAVEN_GPG_PASSPHRASE</passphraseEnvName>
+                                    <!-- CI must supply the passphrase instead of relying on an interactive agent. -->
+                                    <useAgent>false</useAgent>
                                     <gpgArguments>
+                                        <arg>--no-tty</arg>
                                         <arg>--pinentry-mode</arg>
                                         <arg>loopback</arg>
                                     </gpgArguments>
