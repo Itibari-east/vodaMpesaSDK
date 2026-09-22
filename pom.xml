@@ -204,7 +204,8 @@
                                     <goal>sign</goal>
                                 </goals>
                                 <configuration>
-                                    <!-- passphrase injected via -Dgpg.passphrase in CI -->
+                                    <!-- Read the passphrase from the CI environment, not command-line arguments. -->
+                                    <passphraseEnvName>MAVEN_GPG_PASSPHRASE</passphraseEnvName>
                                     <gpgArguments>
                                         <arg>--pinentry-mode</arg>
                                         <arg>loopback</arg>

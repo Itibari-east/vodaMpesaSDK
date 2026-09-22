@@ -477,6 +477,48 @@ It produces the main JAR, sources JAR and Javadoc JAR. No M-Pesa credentials or 
 are required. `mvn install` additionally makes these available to local consumers.
 
 
+### Maven Central release setup
+
+The release workflow runs on pushes to `live`, version tags such as `v1.0.0`, and manual dispatch.
+It deploys using the `release` profile, which currently publishes automatically to Maven Central.
+Use `mvn clean verify` for a build that does not publish.
+
+Before running a release:
+
+1. Set a non-SNAPSHOT version in `pom.xml`, for example `1.0.0`, and commit it. When releasing
+   from a tag, its name must match that version exactly, for example `v1.0.0`. The workflow rejects
+   snapshot versions and mismatched tags before accessing the signing key.
+2. Add the following repository secrets under **Settings → Secrets and variables → Actions**:
+
+   | Secret | Value |
+   |---|---|
+   | `MAVEN_GPG_PRIVATE_KEY` | Complete ASCII-armored GPG **private** signing key, including BEGIN/END lines and actual line breaks |
+   | `MAVEN_GPG_PASSPHRASE` | Passphrase protecting that private key; leave unset only if the key has no passphrase |
+   | `SONATYPE_TOKEN_USERNAME` | Central Portal publishing token username |
+   | `SONATYPE_TOKEN_PASSWORD` | Central Portal publishing token password |
+
+3. Export the signing key on your own machine if needed:
+
+   ```bash
+   gpg --list-secret-keys --keyid-format=long
+   gpg --armor --output /path/to/private/location/maven-signing-key.asc --export-secret-keys YOUR_KEY_FINGERPRINT
+   ```
+
+   Replace the output path with a private location outside this repository. Copy the complete file
+   into `MAVEN_GPG_PRIVATE_KEY`, then securely manage/remove the exported file. Do not commit it.
+   The secret must begin with `-----BEGIN PGP PRIVATE KEY BLOCK-----` and end with
+   `-----END PGP PRIVATE KEY BLOCK-----`. A public key, key fingerprint, literal `\n` sequences,
+   or an extra Base64 encoding of the file will not work.
+4. Ensure the corresponding public signing key is available for Central signature verification
+   and that your Central account can publish to `io.github.montella-03`.
+5. Push the release commit/tag or manually run the workflow on the intended release commit.
+
+The workflow imports the key through `actions/setup-java` and passes the signing passphrase through
+an environment variable. Missing secrets and key-format problems have dedicated validation errors.
+If key import still fails, inspect the final GPG error lines in the setup step; do not paste the
+private key or passphrase into an issue. If signing fails after import, check the passphrase and
+whether the exported key includes usable private signing material.
+
 ## Contributing
 
 Please raise an issue and agree on the scope with a maintainer before starting a contribution.
