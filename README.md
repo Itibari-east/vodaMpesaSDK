@@ -477,6 +477,11 @@ It produces the main JAR, sources JAR and Javadoc JAR. No M-Pesa credentials or 
 are required. `mvn install` additionally makes these available to local consumers.
 
 
+## Contributing
+
+Please raise an issue and agree on the scope with a maintainer before starting a contribution.
+See [CONTRIBUTOR.md](CONTRIBUTOR.md) for issue reporting, development setup, testing, and pull request procedures.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
