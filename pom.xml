@@ -223,9 +223,9 @@
                         <configuration>
                             <!-- Matches <server id="central"> in settings.xml / CI env -->
                             <publishingServerId>central</publishingServerId>
-                            <!-- Upload for review; publication is a separate release step. -->
-                            <autoPublish>false</autoPublish>
-                            <waitUntil>validated</waitUntil>
+                            <!-- CI publishes automatically; flip to false for manual review -->
+                            <autoPublish>true</autoPublish>
+                            <waitUntil>published</waitUntil>
                         </configuration>
                     </plugin>
 
