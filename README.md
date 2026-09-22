@@ -36,7 +36,7 @@ Java 17+ is required. The optional Spring integration targets Spring Boot 3.x, m
 ```java
 import tz.co.vodampesa.VodaMpesaConfig;
 import tz.co.vodampesa.VodaMpesaSdk;
-import model.tz.co.montella.vodampesa.VodaMpesaResult;
+import model.tz.co.vodampesa.VodaMpesaResult;
 
 VodaMpesaConfig config = new VodaMpesaConfig();
 config.
@@ -102,7 +102,7 @@ on a successful HTTP response, but no result exists if the connection fails. A s
 application reconcile an ambiguous outcome without submitting another debit.
 
 ```java
-import model.tz.co.montella.vodampesa.C2bPaymentRequest;
+import model.tz.co.vodampesa.C2bPaymentRequest;
 
 String conversationId = VodaMpesaSdk.newConversationId();
 C2bPaymentRequest request = C2bPaymentRequest.builder()
@@ -281,7 +281,7 @@ VodaMpesaResult status = sdk.queryTransactionStatus("RvvsqB0rcP3Y");
 For reversal credentials required by some portal versions:
 
 ```java
-import model.tz.co.montella.vodampesa.ReversalRequest;
+import model.tz.co.vodampesa.ReversalRequest;
 
 ReversalRequest request = ReversalRequest.builder()
         .transactionId("RvvsqB0rcP3Y")
@@ -380,7 +380,7 @@ unusable integration. No `tenants` or `default-tenant` settings exist.
 | `getResponse()`                              | Parsed provider response envelope                     |
 
 ```java
-import exception.tz.co.montella.vodampesa.VodaMpesaException;
+import exception.tz.co.vodampesa.VodaMpesaException;
 
 try{
 VodaMpesaResult result = sdk.queryTransactionStatus("RvvsqB0rcP3Y");
