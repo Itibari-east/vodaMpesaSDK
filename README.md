@@ -10,26 +10,24 @@ not an executable Spring Boot application. Request DTOs are immutable Java recor
 
 ## Installation
 
-This version is a local development snapshot, **not published to Maven Central**.
-Install it into your local Maven repository first:
-
-```bash
-./mvnw clean install
-# Or use an installed Maven: mvn clean install
-```
-
-Then add:
+Use version `1.0.1` in your project's `pom.xml` after the release is published to Maven Central:
 
 ```xml
 
 <dependency>
     <groupId>io.github.montella-03</groupId>
     <artifactId>vodampesa-sdk</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
+```gradle
+implementation("io.github.montella-03:vodampesa-sdk:1.0.1")
+```
 Java 17+ is required. The optional Spring integration targets Spring Boot 3.x, matching eTIMS SDK.
+
+To build and install a local checkout for development, run `./mvnw clean install` (or `mvn clean install`).
+Installing locally is not required to consume the published release.
 
 ## Quick start: plain Java
 
@@ -379,25 +377,82 @@ unusable integration. No `tenants` or `default-tenant` settings exist.
 | `throwIfFailed()`                            | Throws for non-`INS-0`; does not assert settlement    |
 | `getResponse()`                              | Parsed provider response envelope                     |
 
-```java
-import exception.tz.co.vodampesa.VodaMpesaException;
-
-try{
-VodaMpesaResult result = sdk.queryTransactionStatus("RvvsqB0rcP3Y");
-    result.
-
-throwIfFailed();
-}catch(
-VodaMpesaException ex){
-        // ex.getResponseCode(): provider code when available
-        // ex.getHttpStatus(): HTTP status when available
-        // ex.getMessage(): SDK failure description, without raw request/response credentials
-        }
-```
+Version `1.0.1` adds structured error categories, request correlation, outcome tracking,
+and sanitized diagnostic causes. Existing exception and result constructors remain available.
 
 Invalid caller configuration/fields throw `IllegalArgumentException`; null request objects throw
-`NullPointerException`. HTTP, transport, authentication and protocol failures throw `VodaMpesaException`.
-Business rejections on HTTP 2xx return a result, so callers can inspect codes such as `INS-5` or `INS-10`.
+`NullPointerException`. HTTP, transport, timeout, authentication, and protocol failures throw
+`VodaMpesaException`. Business rejections on HTTP 2xx return a result for inspection;
+`throwIfFailed()` converts them into a `PROVIDER` exception and preserves the provider response,
+operation, and request conversation ID. Request acceptance still does not confirm settlement.
+
+### Structured exceptions
+
+| Exception method | Meaning |
+|------------------|---------|
+| `getCategory()` | `AUTHENTICATION`, `HTTP`, `TIMEOUT`, `TRANSPORT`, `PROTOCOL`, `PROVIDER`, or legacy `UNKNOWN` |
+| `getStage()` | `AUTHENTICATION` before business submission, `REQUEST` during the business operation, or legacy `UNKNOWN` |
+| `getOperation()` | Relative endpoint path; the intended business operation when lazy authentication fails |
+| `getRequestConversationId()` | Locally supplied/generated request ID, retained even when lazy authentication fails |
+| `getHttpStatus()` | HTTP status when retained; otherwise `null` |
+| `getResponseCode()` / `getResponseDesc()` | Provider details when available; otherwise `null` |
+| `getTransactionId()` / `getConversationId()` / `getThirdPartyConversationId()` | Provider correlation identifiers when available; otherwise `null` |
+| `getResponse()` | Parsed provider response fields when available; never the raw body |
+| `isOutcomeUnknown()` | Whether settlement cannot be ruled out for a failed payment/reversal |
+| `getCause()` | Sanitized diagnostic cause when available: original failure class name and stack locations |
+
+`AUTHENTICATION` covers session rejection, encryption failure, and HTTP 401/403. `HTTP` covers
+other non-success HTTP statuses. `TIMEOUT` covers connection/response deadlines; `TRANSPORT`
+covers network I/O failures and interrupted requests. `PROTOCOL` covers invalid JSON or invalid
+response fields. Use the category and stage for decisions instead of parsing exception messages.
+
+Persist the payment request and its conversation ID before sending, as shown in the recommended
+payment workflow. Handle failures using that saved identity:
+
+```java
+import tz.co.vodampesa.exception.VodaMpesaException;
+import tz.co.vodampesa.model.VodaMpesaResult;
+
+try {
+    VodaMpesaResult result = sdk.c2bPayment(request); // Previously saved payment request.
+    result.throwIfFailed();
+    // Save acceptance and provider identifiers; await callback/status completion.
+} catch (VodaMpesaException ex) {
+    String requestId = ex.getRequestConversationId();
+    if (ex.isOutcomeUnknown()) {
+        // Save the payment as unresolved using requestId and any provider identifiers.
+        // Reconcile through a later status query before deciding on another submission.
+    } else if (ex.getStage() == VodaMpesaException.Stage.AUTHENTICATION) {
+        // The payment was not submitted. Investigate credentials, network, or response
+        // issues according to ex.getCategory(); category alone does not identify the stage.
+    }
+    // Record category, stage, operation, requestId, and HTTP/provider codes internally.
+    // Decide how to report or propagate this failure in your application.
+}
+```
+
+### Uncertain outcomes and diagnostics
+
+`isOutcomeUnknown()` is conservative for submitted payments and reversals: HTTP failures,
+response timeouts, malformed responses, interrupted requests, and provider rejection codes
+may still require reconciliation. The flag is `false` for authentication failures before
+submission and explicit connection timeouts. The SDK does not automatically replay payments.
+
+A failed status query also has `isOutcomeUnknown() == false` because the query does not move
+money. **This does not resolve the earlier payment or authorize another debit.** Keep that
+payment unresolved until a successful status query or callback confirms its outcome.
+
+Explicit `initialize()` failures identify the session endpoint and have no payment conversation ID.
+Exceptions from `throwIfFailed()` have a `null` HTTP status because the public result model does
+not retain transport metadata. Exceptions built with the legacy constructor use category/stage
+`UNKNOWN`; legacy results have no operation metadata and conservatively treat rejection as an
+unknown outcome.
+
+SDK-created causes preserve diagnostic class names and stack locations through a sanitized
+exception. Original messages and nested cause chains are excluded because they may expose
+credentials, request URLs, or raw JSON. Branch on `getCategory()` rather than the cause's Java
+type. Provider descriptions and identifiers remain application-controlled data; choose which
+fields to log internally or expose to customers.
 
 ## Configuration reference
 
@@ -468,6 +523,14 @@ src/main/java/tz/co/vodampesa/
     ├── VodaMpesaProperties.java
     └── VodaMpesaAutoConfiguration.java
 ```
+
+## Build and release
+
+`mvn clean verify` runs tests against a localhost mock API, including actual RSA encryption,
+HTTP paths/headers/payloads, session caching/expiry/concurrency, errors, and Spring configuration.
+It produces the main JAR, sources JAR and Javadoc JAR. No M-Pesa credentials or live transactions
+are required. `mvn install` additionally makes these available to local consumers.
+
 
 ## Contributing
 

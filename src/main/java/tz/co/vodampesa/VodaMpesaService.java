@@ -190,7 +190,8 @@ public final class VodaMpesaService {
     }
 
     private VodaMpesaResult send(String path, String method, Map<String, String> body) {
-        return new VodaMpesaResult(client.send(path, method, body), body.get("input_ThirdPartyConversationID"));
+        return new VodaMpesaResult(client.send(path, method, body), body.get("input_ThirdPartyConversationID"),
+                path, body.containsKey("input_QueryReference"));
     }
 
     private String phone(String phone) {
