@@ -12,6 +12,10 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
+import java.net.http.HttpTimeoutException;
+import java.net.http.HttpConnectTimeoutException;
+import static tz.co.vodampesa.exception.VodaMpesaException.Category.*;
+import static tz.co.vodampesa.exception.VodaMpesaException.Stage.REQUEST;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
@@ -54,7 +58,7 @@ public final class VodaMpesaClient {
             this.publicKey = KeyFactory.getInstance("RSA").generatePublic(
                     new X509EncodedKeySpec(Base64.getDecoder().decode(encoded)));
         } catch (GeneralSecurityException | IllegalArgumentException e) {
-            throw new IllegalArgumentException("publicKey must be an RSA X.509 PUBLIC KEY in PEM or Base64 format");
+            throw new IllegalArgumentException("publicKey must be an RSA X.509 PUBLIC KEY in PEM or Base64 format", safeCause(e));
         }
     }
 
@@ -62,8 +66,38 @@ public final class VodaMpesaClient {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
-    private static VodaMpesaException failure(String message, String code, Integer status) {
-        return new VodaMpesaException(message, code, status, null);
+    private VodaMpesaException failure(String message, VodaMpesaException.Category category,
+                                       String path, Map<String, String> payload, Integer status,
+                                       JsonNode json, boolean submitted, Throwable cause) {
+        boolean authentication = path.equals(config.getSessionPath());
+        // Status queries never move money. For submitted mutations, even HTTP errors or
+        // provider rejection codes do not by themselves prove that settlement cannot occur.
+        boolean mutation = payload != null && !payload.containsKey("input_QueryReference");
+        VodaMpesaResponse response = json != null && json.isObject() ? new VodaMpesaResponse(
+                field(json, "output_ResponseCode"), field(json, "output_ResponseDesc"),
+                field(json, "output_TransactionID"), field(json, "output_ConversationID"),
+                field(json, "output_ThirdPartyConversationID"), field(json, "output_ResponseTransactionStatus")) : null;
+        return new VodaMpesaException(message, category, authentication ? VodaMpesaException.Stage.AUTHENTICATION : REQUEST,
+                response == null ? null : response.responseCode(), status, path,
+                payload == null ? null : payload.get("input_ThirdPartyConversationID"), response,
+                !authentication && mutation && submitted, safeCause(cause));
+    }
+
+    private static VodaMpesaException.Category httpCategory(int status) {
+        return status == 401 || status == 403 ? VodaMpesaException.Category.AUTHENTICATION : HTTP;
+    }
+
+    private static String field(JsonNode json, String name) {
+        return json.path(name).isTextual() ? json.path(name).textValue() : null;
+    }
+
+    private static Throwable safeCause(Throwable cause) {
+        if (cause == null) return null;
+        // Original Jackson/HTTP exception messages and cause chains can contain JSON or URLs.
+        // Retain the failure type and stack location without retaining their sensitive data.
+        Exception safe = new Exception("Underlying failure: " + cause.getClass().getName());
+        safe.setStackTrace(cause.getStackTrace());
+        return safe;
     }
 
     public synchronized boolean isInitialized() {
@@ -87,34 +121,46 @@ public final class VodaMpesaClient {
     private synchronized String sessionKey() {
         if (isInitialized()) return session.token();
         Instant requestedAt = clock.instant();
-        JsonNode response = exchange(config.getSessionPath(), "GET", null, encryptedApiKey());
+        Exchange received = exchange(config.getSessionPath(), "GET", null, encryptedApiKey());
+        JsonNode response = received.json();
         String code = response.path("output_ResponseCode").asText(null);
-        if (!"INS-0".equals(code)) throw failure("M-Pesa authentication was rejected", code, null);
+        if (!"INS-0".equals(code)) throw failure("M-Pesa authentication was rejected", VodaMpesaException.Category.AUTHENTICATION,
+                config.getSessionPath(), null, received.status(), response, false, null);
         String key = response.path("output_SessionID").asText(null);
         if (key == null || key.isBlank()) key = response.path("output_SessionKey").asText(null);
         if (key == null || key.isBlank() || key.contains("\r") || key.contains("\n"))
-            throw failure("M-Pesa authentication response has no valid session key", code, null);
+            throw failure("M-Pesa authentication response has no valid session key", PROTOCOL,
+                    config.getSessionPath(), null, received.status(), response, false, null);
         session = new Session(key, requestedAt.plus(config.getSessionLifetime()));
         return key;
     }
 
     public VodaMpesaResponse send(String path, String method, Map<String, String> payload) {
-        String token = sessionKey();
-        JsonNode response;
+        String token;
         try {
-            response = exchange(path, method, payload, token);
+            token = sessionKey();
+        } catch (VodaMpesaException e) {
+            // Keep the business request's identity even when lazy authentication fails.
+            throw new VodaMpesaException(e.getMessage(), e.getCategory(), e.getStage(), e.getResponseCode(),
+                    e.getHttpStatus(), path, payload.get("input_ThirdPartyConversationID"),
+                    e.getResponse(), false, e.getCause());
+        }
+        Exchange received;
+        try {
+            received = exchange(path, method, payload, token);
         } catch (VodaMpesaException e) {
             if (Integer.valueOf(401).equals(e.getHttpStatus()) || Integer.valueOf(403).equals(e.getHttpStatus())
                     || "INS-26".equals(e.getResponseCode())) invalidateIfCurrent(token);
             throw e;
         }
+        JsonNode response = received.json();
         if (!response.path("output_ResponseCode").isTextual() || response.path("output_ResponseCode").asText().isBlank())
-            throw failure("M-Pesa response is missing output_ResponseCode", null, null);
+            throw failure("M-Pesa response is missing output_ResponseCode", PROTOCOL, path, payload, received.status(), response, true, null);
         if ("INS-26".equals(response.path("output_ResponseCode").asText())) invalidateIfCurrent(token);
         try {
             return mapper.treeToValue(response, VodaMpesaResponse.class);
         } catch (IOException e) {
-            throw failure("Invalid M-Pesa response fields", null, null);
+            throw failure("Invalid M-Pesa response fields", PROTOCOL, path, payload, received.status(), response, true, e);
         }
     }
 
@@ -137,11 +183,13 @@ public final class VodaMpesaClient {
             }
             return Base64.getEncoder().encodeToString(cipher.doFinal(config.getApiKey().getBytes(StandardCharsets.UTF_8)));
         } catch (GeneralSecurityException e) {
-            throw failure("Cannot encrypt API key; check the public key and RSA padding configuration", null, null);
+            throw failure("Cannot encrypt API key; check the public key and RSA padding configuration",
+                    VodaMpesaException.Category.AUTHENTICATION, config.getSessionPath(), null, null, null, false, e);
         }
     }
 
-    private JsonNode exchange(String path, String method, Map<String, String> payload, String token) {
+    private Exchange exchange(String path, String method, Map<String, String> payload, String token) {
+        boolean submitted = false;
         try {
             URI uri = URI.create(config.effectiveBaseUrl()).resolve(path);
             HttpRequest.BodyPublisher body = HttpRequest.BodyPublishers.noBody();
@@ -158,26 +206,33 @@ public final class VodaMpesaClient {
                     .header("Authorization", "Bearer " + token).header("Origin", config.getOrigin())
                     .header("Content-Type", "application/json").header("Accept", "application/json")
                     .method(method, body).build();
+            submitted = true; // Once send begins, conservatively assume the provider may receive it.
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             boolean ok = response.statusCode() >= 200 && response.statusCode() < 300;
             JsonNode json;
             try {
                 json = mapper.readTree(response.body());
             } catch (IOException e) {
-                throw failure(ok ? "M-Pesa returned invalid JSON" : "M-Pesa HTTP request failed", null, response.statusCode());
+                throw failure(ok ? "M-Pesa returned invalid JSON" : "M-Pesa HTTP request failed",
+                        ok ? PROTOCOL : httpCategory(response.statusCode()), path, payload, response.statusCode(), null, true, e);
             }
-            if (!ok) throw failure("M-Pesa HTTP request failed",
-                    json == null ? null : json.path("output_ResponseCode").asText(null), response.statusCode());
+            if (!ok) throw failure("M-Pesa HTTP request failed", httpCategory(response.statusCode()), path, payload, response.statusCode(), json, true, null);
             if (json == null || !json.isObject())
-                throw failure("M-Pesa returned an empty or invalid response", null, response.statusCode());
-            return json;
+                throw failure("M-Pesa returned an empty or invalid response", PROTOCOL, path, payload, response.statusCode(), json, true, null);
+            return new Exchange(json, response.statusCode());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw failure("M-Pesa request interrupted; reconcile transaction status before resubmitting", null, null);
+            throw failure("M-Pesa request interrupted", TRANSPORT, path, payload, null, null, submitted, e);
+        } catch (HttpTimeoutException e) {
+            // A connection timeout precedes submission; a response timeout may follow processing.
+            throw failure("M-Pesa request timed out", TIMEOUT, path, payload, null, null,
+                    submitted && !(e instanceof HttpConnectTimeoutException), e);
         } catch (IOException e) {
-            throw failure("M-Pesa transport failure; transaction outcome may be unknown. Query status before resubmitting", null, null);
+            throw failure("M-Pesa transport failure", TRANSPORT, path, payload, null, null, submitted, e);
         }
     }
+
+    private record Exchange(JsonNode json, int status) { }
 
     private record Session(String token, Instant expiresAt) {
         @Override

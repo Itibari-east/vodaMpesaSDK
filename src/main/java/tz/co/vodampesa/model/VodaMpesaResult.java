@@ -11,9 +11,22 @@ import java.util.Optional;
 public final class VodaMpesaResult {
     private final VodaMpesaResponse response;
     private final String requestConversationId;
+    private final String operation;
+    private final boolean statusQuery;
 
     public VodaMpesaResult(VodaMpesaResponse response, String requestConversationId) {
+        this(response, requestConversationId, null, false);
+    }
+
+    /**
+     * Retains the operation for throwIfFailed(); statusQuery identifies a read operation
+     * even when the caller configured a custom endpoint path.
+     */
+    public VodaMpesaResult(VodaMpesaResponse response, String requestConversationId,
+                           String operation, boolean statusQuery) {
         this.response = Objects.requireNonNull(response);
+        this.operation = operation;
+        this.statusQuery = statusQuery;
         this.requestConversationId = requestConversationId;
     }
 
@@ -68,8 +81,15 @@ public final class VodaMpesaResult {
         return response;
     }
 
+    /**
+     * Converts a provider rejection into a structured exception, preserving correlation fields.
+     * A rejection code alone does not establish final settlement; reconcile mutations first.
+     */
     public VodaMpesaResult throwIfFailed() {
-        if (!isAccepted()) throw new VodaMpesaException("M-Pesa rejected the request", getResponseCode(), null, null);
+        if (!isAccepted()) throw new VodaMpesaException("M-Pesa rejected the request",
+                VodaMpesaException.Category.PROVIDER, VodaMpesaException.Stage.REQUEST,
+                getResponseCode(), null, operation, requestConversationId, response,
+                !statusQuery, null);
         return this;
     }
 }

@@ -328,9 +328,173 @@ class VodaMpesaSdkTest {
         VodaMpesaSdk sdk = new VodaMpesaSdk(config);
         VodaMpesaException error = assertThrows(VodaMpesaException.class, () -> sdk.collectPayment("255712345678", 1, "REF", "Payment"));
         assertEquals(status, error.getHttpStatus());
+        assertEquals(status == 401 || status == 403 ? VodaMpesaException.Category.AUTHENTICATION
+                : VodaMpesaException.Category.HTTP, error.getCategory());
+        assertEquals(VodaMpesaException.Stage.REQUEST, error.getStage());
+        assertEquals(config.getC2bPath(), error.getOperation());
+        assertNotNull(error.getRequestConversationId());
+        assertTrue(error.isOutcomeUnknown());
         assertEquals("INS-26", error.getResponseCode());
         assertFalse(sdk.isInitialized());
         assertEquals(2, calls.size());
+    }
+
+    @Test
+    void providerExceptionPreservesResponseAndCorrelation() {
+        replies.add(new Reply(200, """
+                {"output_ResponseCode":"INS-9","output_ResponseDesc":"Unresolved",
+                 "output_TransactionID":"TX-9","output_ConversationID":"C-9",
+                 "output_ThirdPartyConversationID":"provider-reference"}
+                """));
+        VodaMpesaResult result = new VodaMpesaSdk(config).collectPayment("255712345678", 1, "REF", "Payment");
+        VodaMpesaException error = assertThrows(VodaMpesaException.class, result::throwIfFailed);
+        assertEquals(VodaMpesaException.Category.PROVIDER, error.getCategory());
+        assertEquals(VodaMpesaException.Stage.REQUEST, error.getStage());
+        assertEquals(result.getRequestConversationId(), error.getRequestConversationId());
+        assertEquals(config.getC2bPath(), error.getOperation());
+        assertEquals("Unresolved", error.getResponseDesc());
+        assertEquals("TX-9", error.getTransactionId());
+        assertEquals("C-9", error.getConversationId());
+        assertEquals("provider-reference", error.getThirdPartyConversationId());
+        assertSame(result.getResponse(), error.getResponse());
+        assertTrue(error.isOutcomeUnknown());
+    }
+
+    @Test
+    void lazyAuthenticationFailureRetainsPaymentIdentityWithoutUnknownOutcome() {
+        sessionBody = "{\"output_ResponseCode\":\"INS-26\",\"output_ResponseDesc\":\"Denied\"}";
+        VodaMpesaException error = assertThrows(VodaMpesaException.class,
+                () -> new VodaMpesaSdk(config).collectPayment("255712345678", 1, "REF", "Payment"));
+        assertEquals(VodaMpesaException.Category.AUTHENTICATION, error.getCategory());
+        assertEquals(VodaMpesaException.Stage.AUTHENTICATION, error.getStage());
+        assertEquals(config.getC2bPath(), error.getOperation());
+        assertNotNull(error.getRequestConversationId());
+        assertEquals(200, error.getHttpStatus());
+        assertEquals("Denied", error.getResponseDesc());
+        assertFalse(error.isOutcomeUnknown());
+        assertEquals(1, calls.size());
+    }
+
+    @Test
+    void protocolFailureRetainsStatusAndSanitizesCause() {
+        replies.add(new Reply(200, "{\"secret\":\"api-secret\",broken"));
+        VodaMpesaException error = assertThrows(VodaMpesaException.class,
+                () -> new VodaMpesaSdk(config).collectPayment("255712345678", 1, "REF", "Payment"));
+        assertEquals(VodaMpesaException.Category.PROTOCOL, error.getCategory());
+        assertEquals(200, error.getHttpStatus());
+        assertNotNull(error.getRequestConversationId());
+        assertTrue(error.isOutcomeUnknown());
+        assertNotNull(error.getCause());
+        assertTrue(error.getCause().getMessage().contains("JsonParseException"));
+        assertNull(error.getCause().getCause());
+        java.io.StringWriter trace = new java.io.StringWriter();
+        error.printStackTrace(new java.io.PrintWriter(trace));
+        assertFalse(trace.toString().contains("api-secret"));
+        assertFalse(trace.toString().contains("broken"));
+        assertFalse(trace.toString().contains("session-secret"));
+    }
+
+    @Test
+    void statusQueryFailuresDoNotImplyAnUnknownDebit() {
+        // An overridden endpoint must still be recognized by the operation, not its path name.
+        config.setQueryStatusPath("customStatus/");
+        replies.add(new Reply(200, "{\"output_ResponseCode\":\"INS-9\"}"));
+        VodaMpesaSdk sdk = new VodaMpesaSdk(config);
+        VodaMpesaException provider = assertThrows(VodaMpesaException.class,
+                () -> sdk.queryTransactionStatus("TX-1").throwIfFailed());
+        assertFalse(provider.isOutcomeUnknown());
+        replies.add(new Reply(500, "{\"output_ResponseCode\":\"INS-9\",\"output_ResponseDesc\":\"Unavailable\"}"));
+        VodaMpesaException http = assertThrows(VodaMpesaException.class,
+                () -> sdk.queryTransactionStatus("TX-1"));
+        assertEquals(VodaMpesaException.Category.HTTP, http.getCategory());
+        assertEquals("Unavailable", http.getResponseDesc());
+        assertFalse(http.isOutcomeUnknown());
+    }
+
+    @Test
+    void responseTimeoutRetainsPaymentIdentityAndDoesNotReplay() throws Exception {
+        VodaMpesaSdk warmup = new VodaMpesaSdk(config);
+        warmup.initialize();
+        CountDownLatch reached = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger submissions = new AtomicInteger();
+        server.createContext("/sandbox/ipg/v2/vodacomTZN/c2bPayment/", exchange -> {
+            submissions.incrementAndGet();
+            reached.countDown();
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                exchange.close();
+            }
+        });
+        config.setRequestTimeout(Duration.ofMillis(500));
+        VodaMpesaSdk sdk = new VodaMpesaSdk(config);
+        sdk.initialize();
+        try {
+            VodaMpesaException error = assertThrows(VodaMpesaException.class,
+                    () -> sdk.collectPayment("255712345678", 1, "REF", "Payment"));
+            assertTrue(reached.await(1, TimeUnit.SECONDS));
+            assertEquals(VodaMpesaException.Category.TIMEOUT, error.getCategory());
+            assertTrue(error.isOutcomeUnknown());
+            assertNotNull(error.getRequestConversationId());
+            assertTrue(error.getCause().getMessage().contains("HttpTimeoutException"));
+            assertEquals(1, submissions.get());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void interruptedPaymentRestoresInterruptAndKeepsContext() {
+        VodaMpesaSdk sdk = new VodaMpesaSdk(config);
+        sdk.initialize();
+        Thread.currentThread().interrupt();
+        try {
+            VodaMpesaException error = assertThrows(VodaMpesaException.class,
+                    () -> sdk.collectPayment("255712345678", 1, "REF", "Payment"));
+            assertEquals(VodaMpesaException.Category.TRANSPORT, error.getCategory());
+            assertTrue(Thread.currentThread().isInterrupted());
+            assertNotNull(error.getRequestConversationId());
+            assertTrue(error.isOutcomeUnknown());
+            assertTrue(error.getCause().getMessage().contains("InterruptedException"));
+        } finally {
+            Thread.interrupted(); // Do not leak the interrupt flag into other tests.
+        }
+    }
+
+    @Test
+    void transportFailureRetainsSanitizedCauseAndRequestIdentity() {
+        VodaMpesaSdk sdk = new VodaMpesaSdk(config);
+        sdk.initialize();
+        server.stop(0);
+        VodaMpesaException error = assertThrows(VodaMpesaException.class,
+                () -> sdk.collectPayment("255712345678", 1, "REF", "Payment"));
+        assertEquals(VodaMpesaException.Category.TRANSPORT, error.getCategory());
+        assertEquals(VodaMpesaException.Stage.REQUEST, error.getStage());
+        assertNotNull(error.getRequestConversationId());
+        assertNotNull(error.getCause());
+        assertNull(error.getCause().getCause());
+        assertFalse(error.getCause().toString().contains(config.getBaseUrl()));
+        // General I/O failures are conservative; unlike an explicit connection timeout,
+        // they do not reliably tell the SDK whether a request reached the provider.
+        assertTrue(error.isOutcomeUnknown());
+        assertEquals(1, calls.size());
+    }
+
+    @Test
+    void legacyConstructorsRemainUsable() {
+        VodaMpesaException error = new VodaMpesaException("Legacy", "INS-9", 500, null);
+        assertEquals("INS-9", error.getResponseCode());
+        assertEquals(500, error.getHttpStatus());
+        assertEquals(VodaMpesaException.Category.UNKNOWN, error.getCategory());
+        assertEquals(VodaMpesaException.Stage.UNKNOWN, error.getStage());
+        assertTrue(error.isOutcomeUnknown());
+        assertNull(error.getResponseDesc());
+        VodaMpesaResult result = new VodaMpesaResult(
+                new tz.co.vodampesa.model.VodaMpesaResponse("INS-9", "Unknown", null, null, null, null), "saved-id");
+        assertEquals("saved-id", assertThrows(VodaMpesaException.class, result::throwIfFailed).getRequestConversationId());
     }
 
     @Test
