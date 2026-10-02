@@ -10,17 +10,20 @@ not an executable Spring Boot application. Request DTOs are immutable Java recor
 
 ## Installation
 
-Add the published `1.0.0` release from Maven Central to your project's `pom.xml`:
+Use version `1.0.1` in your project's `pom.xml` after the release is published to Maven Central:
 
 ```xml
 
 <dependency>
     <groupId>io.github.montella-03</groupId>
     <artifactId>vodampesa-sdk</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
+```gradle
+implementation("io.github.montella-03:vodampesa-sdk:1.0.1")
+```
 Java 17+ is required. The optional Spring integration targets Spring Boot 3.x, matching eTIMS SDK.
 
 To build and install a local checkout for development, run `./mvnw clean install` (or `mvn clean install`).
@@ -374,25 +377,82 @@ unusable integration. No `tenants` or `default-tenant` settings exist.
 | `throwIfFailed()`                            | Throws for non-`INS-0`; does not assert settlement    |
 | `getResponse()`                              | Parsed provider response envelope                     |
 
-```java
-import exception.tz.co.vodampesa.VodaMpesaException;
-
-try{
-VodaMpesaResult result = sdk.queryTransactionStatus("RvvsqB0rcP3Y");
-    result.
-
-throwIfFailed();
-}catch(
-VodaMpesaException ex){
-        // ex.getResponseCode(): provider code when available
-        // ex.getHttpStatus(): HTTP status when available
-        // ex.getMessage(): SDK failure description, without raw request/response credentials
-        }
-```
+Version `1.0.1` adds structured error categories, request correlation, outcome tracking,
+and sanitized diagnostic causes. Existing exception and result constructors remain available.
 
 Invalid caller configuration/fields throw `IllegalArgumentException`; null request objects throw
-`NullPointerException`. HTTP, transport, authentication and protocol failures throw `VodaMpesaException`.
-Business rejections on HTTP 2xx return a result, so callers can inspect codes such as `INS-5` or `INS-10`.
+`NullPointerException`. HTTP, transport, timeout, authentication, and protocol failures throw
+`VodaMpesaException`. Business rejections on HTTP 2xx return a result for inspection;
+`throwIfFailed()` converts them into a `PROVIDER` exception and preserves the provider response,
+operation, and request conversation ID. Request acceptance still does not confirm settlement.
+
+### Structured exceptions
+
+| Exception method | Meaning |
+|------------------|---------|
+| `getCategory()` | `AUTHENTICATION`, `HTTP`, `TIMEOUT`, `TRANSPORT`, `PROTOCOL`, `PROVIDER`, or legacy `UNKNOWN` |
+| `getStage()` | `AUTHENTICATION` before business submission, `REQUEST` during the business operation, or legacy `UNKNOWN` |
+| `getOperation()` | Relative endpoint path; the intended business operation when lazy authentication fails |
+| `getRequestConversationId()` | Locally supplied/generated request ID, retained even when lazy authentication fails |
+| `getHttpStatus()` | HTTP status when retained; otherwise `null` |
+| `getResponseCode()` / `getResponseDesc()` | Provider details when available; otherwise `null` |
+| `getTransactionId()` / `getConversationId()` / `getThirdPartyConversationId()` | Provider correlation identifiers when available; otherwise `null` |
+| `getResponse()` | Parsed provider response fields when available; never the raw body |
+| `isOutcomeUnknown()` | Whether settlement cannot be ruled out for a failed payment/reversal |
+| `getCause()` | Sanitized diagnostic cause when available: original failure class name and stack locations |
+
+`AUTHENTICATION` covers session rejection, encryption failure, and HTTP 401/403. `HTTP` covers
+other non-success HTTP statuses. `TIMEOUT` covers connection/response deadlines; `TRANSPORT`
+covers network I/O failures and interrupted requests. `PROTOCOL` covers invalid JSON or invalid
+response fields. Use the category and stage for decisions instead of parsing exception messages.
+
+Persist the payment request and its conversation ID before sending, as shown in the recommended
+payment workflow. Handle failures using that saved identity:
+
+```java
+import tz.co.vodampesa.exception.VodaMpesaException;
+import tz.co.vodampesa.model.VodaMpesaResult;
+
+try {
+    VodaMpesaResult result = sdk.c2bPayment(request); // Previously saved payment request.
+    result.throwIfFailed();
+    // Save acceptance and provider identifiers; await callback/status completion.
+} catch (VodaMpesaException ex) {
+    String requestId = ex.getRequestConversationId();
+    if (ex.isOutcomeUnknown()) {
+        // Save the payment as unresolved using requestId and any provider identifiers.
+        // Reconcile through a later status query before deciding on another submission.
+    } else if (ex.getStage() == VodaMpesaException.Stage.AUTHENTICATION) {
+        // The payment was not submitted. Investigate credentials, network, or response
+        // issues according to ex.getCategory(); category alone does not identify the stage.
+    }
+    // Record category, stage, operation, requestId, and HTTP/provider codes internally.
+    // Decide how to report or propagate this failure in your application.
+}
+```
+
+### Uncertain outcomes and diagnostics
+
+`isOutcomeUnknown()` is conservative for submitted payments and reversals: HTTP failures,
+response timeouts, malformed responses, interrupted requests, and provider rejection codes
+may still require reconciliation. The flag is `false` for authentication failures before
+submission and explicit connection timeouts. The SDK does not automatically replay payments.
+
+A failed status query also has `isOutcomeUnknown() == false` because the query does not move
+money. **This does not resolve the earlier payment or authorize another debit.** Keep that
+payment unresolved until a successful status query or callback confirms its outcome.
+
+Explicit `initialize()` failures identify the session endpoint and have no payment conversation ID.
+Exceptions from `throwIfFailed()` have a `null` HTTP status because the public result model does
+not retain transport metadata. Exceptions built with the legacy constructor use category/stage
+`UNKNOWN`; legacy results have no operation metadata and conservatively treat rejection as an
+unknown outcome.
+
+SDK-created causes preserve diagnostic class names and stack locations through a sanitized
+exception. Original messages and nested cause chains are excluded because they may expose
+credentials, request URLs, or raw JSON. Branch on `getCategory()` rather than the cause's Java
+type. Provider descriptions and identifiers remain application-controlled data; choose which
+fields to log internally or expose to customers.
 
 ## Configuration reference
 
@@ -471,73 +531,6 @@ HTTP paths/headers/payloads, session caching/expiry/concurrency, errors, and Spr
 It produces the main JAR, sources JAR and Javadoc JAR. No M-Pesa credentials or live transactions
 are required. `mvn install` additionally makes these available to local consumers.
 
-
-### Maven Central release setup
-
-The release workflow runs on pushes to `live`, version tags such as `v1.0.0`, and manual dispatch.
-It deploys using the `release` profile, which currently publishes automatically to Maven Central.
-Use `mvn clean verify` for a build that does not publish.
-
-Before running a release:
-
-1. Set a non-SNAPSHOT version in `pom.xml`, for example `1.0.0`, and commit it. When releasing
-   from a tag, its name must match that version exactly, for example `v1.0.0`. The workflow rejects
-   snapshot versions and mismatched tags when the `Validate release version` step is enabled.
-2. Add the following repository secrets under **Settings → Secrets and variables → Actions**:
-
-   | Secret | Value |
-   |---|---|
-   | `MAVEN_GPG_PRIVATE_KEY` | Complete ASCII-armored GPG **private** signing key, including BEGIN/END lines and actual line breaks |
-   | `MAVEN_GPG_PASSPHRASE` | Passphrase protecting that private key; leave unset only if the key has no passphrase |
-   | `SONATYPE_TOKEN_USERNAME` | Central Portal publishing token username |
-   | `SONATYPE_TOKEN_PASSWORD` | Central Portal publishing token password |
-
-3. Export the signing key on your own machine if needed:
-
-   ```bash
-   gpg --list-secret-keys --keyid-format=long
-   gpg --armor --output /path/to/private/location/maven-signing-key.asc --export-secret-keys YOUR_KEY_FINGERPRINT
-   ```
-
-   Replace the output path with a private location outside this repository. Copy the complete file
-   into `MAVEN_GPG_PRIVATE_KEY`, then securely manage/remove the exported file. Do not commit it.
-   The secret must begin with `-----BEGIN PGP PRIVATE KEY BLOCK-----` and end with
-   `-----END PGP PRIVATE KEY BLOCK-----`. A public key, key fingerprint, literal `\n` sequences,
-   or an extra Base64 encoding of the file will not work.
-4. Ensure the corresponding public signing key is available for Central signature verification
-   and that your Central account can publish to `io.github.montella-03`.
-5. Push the release commit/tag or manually run the workflow on the intended release commit.
-
-The workflow imports the key through `actions/setup-java` and passes the signing passphrase through
-an environment variable. Missing secrets and key-format problems have dedicated validation errors.
-If key import still fails, inspect the final GPG error lines in the setup step; do not paste the
-private key or passphrase into an issue. If signing fails after import, check the passphrase and
-whether the exported key includes usable private signing material.
-
-If GPG reports `signing failed: No pinentry`, it attempted an interactive passphrase prompt that
-is unavailable in CI. The workflow now tests signing in batch/loopback mode before deploying,
-and Maven reads `MAVEN_GPG_PASSPHRASE` without relying on an interactive agent. Ensure that this
-Actions secret contains the passphrase for the imported signing key (not your Central token)
-and is accessible to the workflow. A missing or incorrect passphrase for a protected key will fail
-the signing check. No interactive pinentry program should be needed.
-
-### Published artifact but CI reports a status-parsing failure
-
-With `central-publishing-maven-plugin:0.5.0`, deployment can finish on Sonatype's servers while the
-plugin fails polling its status with `Unrecognized field "warnings"` on `DeploymentApiResponse`.
-That exception concerns the publishing client's response parsing, not the SDK's payment JSON models.
-The release profile now uses `0.11.0`, whose [release notes](https://central.sonatype.org/publish/publish-portal-maven/#0110)
-include support for publishing usage warnings.
-
-If this happens after upload, check the existing deployment ID in the
-[Central Portal](https://central.sonatype.com/publishing/deployments) before taking further action.
-If it is `PUBLISHED`, the release is complete even though the CI run failed. Do not rerun deployment
-for the same published version; published releases cannot be overwritten. Apply the plugin upgrade
-for future releases and use a new version for subsequent SDK changes. If the deployment is still
-processing or failed validation, inspect that deployment's status and messages first.
-
-The workflow continues to wait for `published`; it does not suppress errors or skip validation to
-make a release job appear successful. Updating the workflow does not change the result of an old CI run.
 
 ## Contributing
 
